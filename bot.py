@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 load_dotenv()
 
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, ContextTypes
 from aiohttp import web
 
@@ -127,13 +127,24 @@ async def resolver_loop():
         await asyncio.sleep(RESOLVE_INTERVAL)
 
 # ── Telegram commands ─────────────────────────────────────────────────────────
+KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("📂 Positions"), KeyboardButton("📋 Journal")],
+        [KeyboardButton("💰 P&L"),       KeyboardButton("ℹ️ Status")],
+        [KeyboardButton("🔄 Reset")],
+    ],
+    resize_keyboard=True,
+    persistent=True,
+)
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER: return
     await update.message.reply_text(
         f"Momentum Arb Bot\n"
         f"Paper: {PAPER_MODE}\n"
         f"Stake: ${os.getenv('MOMENTUM_STAKE', '3.0')}/trade\n"
-        f"Scan: every {SCAN_INTERVAL}s"
+        f"Scan: every {SCAN_INTERVAL}s",
+        reply_markup=KEYBOARD
     )
 
 async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -197,7 +208,24 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Total P&L: ${total:+.2f}"
     )
 
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ALLOWED_USER: return
+    open_trades = get_open_trades("momentum_arb")
+    conn = get_conn()
+    closed = conn.execute("SELECT COUNT(*) as c FROM trades WHERE status='closed'").fetchone()["c"]
+    conn.close()
+    await update.message.reply_text(
+        f"Momentum Arb Bot\n"
+        f"Paper: {PAPER_MODE}\n"
+        f"Stake: ${os.getenv('MOMENTUM_STAKE', '3.0')}/trade\n"
+        f"Open positions: {len(open_trades)}\n"
+        f"Closed trades: {closed}\n"
+        f"Scan: every {SCAN_INTERVAL}s",
+        reply_markup=KEYBOARD
+    )
+
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     if update.effective_user.id != ALLOWED_USER: return
     conn = get_conn()
     conn.execute("DELETE FROM trades")
@@ -224,11 +252,25 @@ def main():
         .post_init(on_startup)
         .build()
     )
+    from telegram.ext import MessageHandler, filters
+    async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != ALLOWED_USER: return
+        text = update.message.text
+        if text == "📂 Positions":  await cmd_positions(update, context)
+        elif text == "📋 Journal":  await cmd_journal(update, context)
+        elif text == "💰 P&L":      await cmd_pnl(update, context)
+        elif text == "ℹ️ Status":   await cmd_status(update, context)
+        elif text == "🔄 Reset":    await cmd_reset(update, context)
+
     application.add_handler(CommandHandler("start",     cmd_start))
+
     application.add_handler(CommandHandler("positions", cmd_positions))
     application.add_handler(CommandHandler("journal",   cmd_journal))
     application.add_handler(CommandHandler("pnl",       cmd_pnl))
     application.add_handler(CommandHandler("reset",     cmd_reset))
+    application.add_handler(CommandHandler("status",    cmd_status))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, button_handler))
+
 
     PORT = int(os.getenv("PORT", 8080))
     application.run_polling(
