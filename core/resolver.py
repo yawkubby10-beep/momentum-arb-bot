@@ -124,8 +124,10 @@ class MomentumResolver:
         """Fetch live Polymarket share price from CLOB API."""
         session = await self._get_session()
         try:
+            url = f"https://clob.polymarket.com/price?token_id={token_id}&side=BUY"
+            logger.info(f"CLOB fetch: {url[:80]}")
             async with session.get(
-                f"https://clob.polymarket.com/price?token_id={token_id}&side=BUY",
+                url,
                 headers={
                     "User-Agent": "Mozilla/5.0",
                     "Accept": "application/json",
@@ -134,13 +136,14 @@ class MomentumResolver:
                 },
                 timeout=aiohttp.ClientTimeout(total=5)
             ) as r:
+                body = await r.text()
+                logger.info(f"CLOB response: status={r.status} body={body[:100]}")
                 if r.status == 200:
-                    d = await r.json(content_type=None)
+                    import json as _j
+                    d = _j.loads(body)
                     return float(d.get("price") or 0)
-                else:
-                    logger.debug(f"CLOB HTTP {r.status} for token {token_id[:20]}")
         except Exception as e:
-            logger.debug(f"CLOB fetch error: {e}")
+            logger.info(f"CLOB fetch exception: {e}")
         return 0.0
 
     async def close(self):
