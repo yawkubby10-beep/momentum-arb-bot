@@ -14,7 +14,7 @@ from typing import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.getenv("DB_PATH", "/home/claude/nexus_build/data/nexus.db")
+DB_PATH = os.getenv("DB_PATH", "/data/momentum.db")
 
 
 def get_conn():
