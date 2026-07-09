@@ -75,8 +75,10 @@ class MomentumResolver:
             else:
                 token_id = raw_tid
 
+            logger.info(f"Resolver: {symbol} token_id={str(token_id)[:20]!r} meta_keys={list(meta.keys())}")
             if token_id:
                 share_price = await self._fetch_share_price(token_id)
+                logger.info(f"Resolver: {symbol} share_price={share_price}")
                 if share_price > 0:
                     logger.info(f"Share price: {symbol} {share_price:.3f} SL={stop_loss} TP={take_profit} side={side}")
                     # YES: profit when price rises → TP when high, SL when low
