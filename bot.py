@@ -25,7 +25,7 @@ from aiohttp import web
 from core.momentum_arb import MomentumArbStrategy
 from core.resolver import MomentumResolver
 from core.database import (
-    init_db, get_open_trades, get_all_trades,
+    init_db, get_open_trades, get_performance,
     is_daily_loss_limit_hit, get_conn
 )
 
@@ -153,7 +153,12 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_journal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER: return
-    trades = [t for t in get_all_trades() if t.get("status") == "closed"]
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM trades WHERE status='closed' ORDER BY closed_at DESC LIMIT 30"
+    ).fetchall()
+    conn.close()
+    trades = [dict(r) for r in rows]
     if not trades:
         await update.message.reply_text("No closed trades yet.")
         return
@@ -177,7 +182,10 @@ async def cmd_journal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER: return
-    trades = [t for t in get_all_trades() if t.get("status") == "closed"]
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM trades WHERE status='closed'").fetchall()
+    conn.close()
+    trades = [dict(r) for r in rows]
     wins   = [t for t in trades if (t.get("pnl") or 0) > 0]
     losses = [t for t in trades if (t.get("pnl") or 0) < 0]
     total  = sum(t.get("pnl") or 0 for t in trades)
