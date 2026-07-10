@@ -134,7 +134,6 @@ KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton("🔄 Reset")],
     ],
     resize_keyboard=True,
-    persistent=True,
 )
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
