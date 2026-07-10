@@ -80,29 +80,108 @@ class MomentumArbStrategy:
     # Binance price fetching                                               #
     # ------------------------------------------------------------------ #
     async def get_binance_prices(self) -> Dict[str, float]:
-        """Fetch prices from KuCoin (Binance blocked on Railway egress)."""
+        """Fetch prices with multiple fallbacks: KuCoin → OKX → Bybit → CoinGecko."""
         session = await self._get_session()
-        prices  = {}
-        kucoin_map = {
-            "BTCUSDT": "BTC-USDT",
-            "ETHUSDT": "ETH-USDT",
-            "SOLUSDT": "SOL-USDT",
-        }
+
+        # Try KuCoin first
+        prices = await self._fetch_kucoin(session)
+        if prices:
+            logger.info(f"Momentum arb: got {len(prices)} prices from KuCoin: {list(prices.keys())}")
+            return prices
+
+        # Fallback 1: OKX
+        prices = await self._fetch_okx(session)
+        if prices:
+            logger.info(f"Momentum arb: got {len(prices)} prices from OKX: {list(prices.keys())}")
+            return prices
+
+        # Fallback 2: Bybit
+        prices = await self._fetch_bybit(session)
+        if prices:
+            logger.info(f"Momentum arb: got {len(prices)} prices from Bybit: {list(prices.keys())}")
+            return prices
+
+        # Fallback 3: CoinGecko (free, no auth)
+        prices = await self._fetch_coingecko(session)
+        if prices:
+            logger.info(f"Momentum arb: got {len(prices)} prices from CoinGecko: {list(prices.keys())}")
+            return prices
+
+        logger.warning("Momentum arb: all price sources failed")
+        return {}
+
+    async def _fetch_kucoin(self, session) -> Dict[str, float]:
+        prices = {}
+        kucoin_map = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT", "SOLUSDT": "SOL-USDT"}
         try:
-            for binance_sym, kucoin_sym in kucoin_map.items():
+            for sym, ksym in kucoin_map.items():
                 async with session.get(
                     "https://api.kucoin.com/api/v1/market/orderbook/level1",
-                    params={"symbol": kucoin_sym}
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        price_str = (data.get("data") or {}).get("price")
-                        if price_str:
-                            prices[binance_sym] = float(price_str)
-                    await asyncio.sleep(0.05)
+                    params={"symbol": ksym}, timeout=aiohttp.ClientTimeout(total=5)
+                ) as r:
+                    if r.status == 200:
+                        d = await r.json()
+                        p = (d.get("data") or {}).get("price")
+                        if p: prices[sym] = float(p)
+                await asyncio.sleep(0.05)
         except Exception as e:
-            logger.info(f"KuCoin price fetch error: {e}")
-        logger.info(f"Momentum arb: got {len(prices)} prices from KuCoin: {list(prices.keys())}")
+            logger.debug(f"KuCoin failed: {e}")
+        return prices
+
+    async def _fetch_okx(self, session) -> Dict[str, float]:
+        prices = {}
+        okx_map = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT", "SOLUSDT": "SOL-USDT"}
+        try:
+            for sym, osym in okx_map.items():
+                async with session.get(
+                    f"https://www.okx.com/api/v5/market/ticker",
+                    params={"instId": osym}, timeout=aiohttp.ClientTimeout(total=5)
+                ) as r:
+                    if r.status == 200:
+                        d = await r.json()
+                        items = (d.get("data") or [])
+                        if items:
+                            p = items[0].get("last")
+                            if p: prices[sym] = float(p)
+        except Exception as e:
+            logger.debug(f"OKX failed: {e}")
+        return prices
+
+    async def _fetch_bybit(self, session) -> Dict[str, float]:
+        prices = {}
+        bybit_map = {"BTCUSDT": "BTCUSDT", "ETHUSDT": "ETHUSDT", "SOLUSDT": "SOLUSDT"}
+        try:
+            for sym, bsym in bybit_map.items():
+                async with session.get(
+                    "https://api.bybit.com/v5/market/tickers",
+                    params={"category": "spot", "symbol": bsym},
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as r:
+                    if r.status == 200:
+                        d = await r.json()
+                        items = ((d.get("result") or {}).get("list") or [])
+                        if items:
+                            p = items[0].get("lastPrice")
+                            if p: prices[sym] = float(p)
+        except Exception as e:
+            logger.debug(f"Bybit failed: {e}")
+        return prices
+
+    async def _fetch_coingecko(self, session) -> Dict[str, float]:
+        prices = {}
+        try:
+            async with session.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": "bitcoin,ethereum,solana", "vs_currencies": "usd"},
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    if d.get("bitcoin"): prices["BTCUSDT"] = float(d["bitcoin"]["usd"])
+                    if d.get("ethereum"): prices["ETHUSDT"] = float(d["ethereum"]["usd"])
+                    if d.get("solana"): prices["SOLUSDT"] = float(d["solana"]["usd"])
+        except Exception as e:
+            logger.debug(f"CoinGecko failed: {e}")
         return prices
     def detect_momentum(self, symbol: str, current_price: float) -> Optional[str]:
         """
