@@ -330,6 +330,13 @@ class MomentumArbStrategy:
             if not market:
                 continue
 
+            # Skip near-resolved markets
+            yes_p = float(market.get("yes_price") or 0.5)
+            no_p  = float(market.get("no_price") or 0.5)
+            if yes_p < 0.05 or yes_p > 0.95 or no_p < 0.05 or no_p > 0.95:
+                logger.debug(f"Skip {crypto}: near-resolved YES={yes_p:.3f} NO={no_p:.3f}")
+                continue
+
             # Check if Polymarket hasn't priced in the momentum yet
             # If BTC is strongly UP but market YES is still ~50%, that's the lag
             yes_prob = market["yes_price"] * 100
