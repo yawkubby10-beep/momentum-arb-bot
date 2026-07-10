@@ -14,7 +14,8 @@ from typing import Optional, List, Dict
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.getenv("DB_PATH", "/data/momentum.db")
+_default_db = "/data/momentum.db" if os.path.isdir("/data") else "/tmp/momentum.db"
+DB_PATH = os.getenv("DB_PATH", _default_db)
 
 
 def get_conn():
@@ -108,7 +109,7 @@ def init_db():
                 VALUES (?, ?, ?)
             """, (key, val, datetime.now(timezone.utc).isoformat()))
         conn.commit()
-        logger.info("NEXUS database initialized")
+        logger.info("Momentum Arb database initialized")
     finally:
         conn.close()
 
