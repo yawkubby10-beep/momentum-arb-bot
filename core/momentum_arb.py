@@ -49,7 +49,7 @@ BINANCE_REST   = "https://api.binance.com/api/v3/ticker/price"
 # Momentum thresholds (calibrated from research)
 MOMENTUM_THRESHOLD = 0.0015  # 0.15% move in 60 seconds = strong momentum signals = strong signal
 MIN_LIQUIDITY      = 500      # minimum market liquidity to trade
-STAKE              = float(os.getenv("MOMENTUM_STAKE", "3.0"))
+STAKE              = float(os.getenv("MOMENTUM_STAKE", "10.0"))
 
 SYMBOLS = {
     "BTCUSDT": "btc",
