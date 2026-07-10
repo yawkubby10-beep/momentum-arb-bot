@@ -350,6 +350,8 @@ class MomentumArbStrategy:
                     "question":       market["question"],
                     "kucoin_price":   prices.get(binance_symbol, 0),
                     "slug":           market.get("slug", ""),
+                    "stop_loss":      round(market["yes_price"] * 0.70, 4),
+                    "take_profit":    round(min(market["yes_price"] * 1.50, 0.95), 4),
                 })
                 logger.info(f"Momentum signal: {crypto} UP, market YES={yes_prob:.0f}% (lag detected)")
 
@@ -369,6 +371,8 @@ class MomentumArbStrategy:
                     "question":       market["question"],
                     "kucoin_price":   prices.get(binance_symbol, 0),
                     "slug":           market.get("slug", ""),
+                    "stop_loss":      round(market["no_price"] * 0.70, 4),
+                    "take_profit":    round(min(market["no_price"] * 1.50, 0.95), 4),
                 })
                 logger.info(f"Momentum signal: {crypto} DOWN, market YES={yes_prob:.0f}% (lag detected)")
 
