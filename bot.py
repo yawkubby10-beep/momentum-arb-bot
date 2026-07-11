@@ -347,31 +347,31 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Fetching balance...")
     try:
         async with __import__("aiohttp").ClientSession() as session:
-            # USDC on Polygon — contract 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
+            # Use Polygon RPC directly — no API key needed
+            POLYGON_RPC  = "https://polygon-rpc.com"
             USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-            # Use Polygonscan API (free, no key needed for basic calls)
-            usdc_url = (
-                f"https://api.polygonscan.com/api"
-                f"?module=account&action=tokenbalance"
-                f"&contractaddress={USDC_CONTRACT}"
-                f"&address={wallet}"
-                f"&tag=latest"
-            )
-            matic_url = (
-                f"https://api.polygonscan.com/api"
-                f"?module=account&action=balance"
-                f"&address={wallet}"
-                f"&tag=latest"
-            )
-            async with session.get(usdc_url, timeout=__import__("aiohttp").ClientTimeout(total=8)) as r:
-                usdc_data = await r.json()
-            async with session.get(matic_url, timeout=__import__("aiohttp").ClientTimeout(total=8)) as r:
-                matic_data = await r.json()
+            # balanceOf(address) selector = 0x70a08231
+            usdc_data_hex = "0x70a08231" + wallet[2:].lower().zfill(64)
+            usdc_payload  = {
+                "jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                "params": [{"to": USDC_CONTRACT, "data": usdc_data_hex}, "latest"]
+            }
+            matic_payload = {
+                "jsonrpc": "2.0", "id": 2, "method": "eth_getBalance",
+                "params": [wallet, "latest"]
+            }
+            timeout = __import__("aiohttp").ClientTimeout(total=8)
+            async with session.post(POLYGON_RPC, json=usdc_payload, timeout=timeout) as r:
+                usdc_resp = await r.json()
+            async with session.post(POLYGON_RPC, json=matic_payload, timeout=timeout) as r:
+                matic_resp = await r.json()
             # USDC has 6 decimals on Polygon
-            usdc_raw  = int(usdc_data.get("result", "0") or "0")
+            usdc_hex  = usdc_resp.get("result", "0x0") or "0x0"
+            usdc_raw  = int(usdc_hex, 16)
             usdc_bal  = usdc_raw / 1_000_000
             # MATIC has 18 decimals
-            matic_raw = int(matic_data.get("result", "0") or "0")
+            matic_hex = matic_resp.get("result", "0x0") or "0x0"
+            matic_raw = int(matic_hex, 16)
             matic_bal = matic_raw / 10**18
             mode    = "🚨 KILL SWITCH ON" if KILL_SWITCH else ("💵 LIVE" if not PAPER_MODE else "📄 PAPER")
             short   = wallet[:6] + "..." + wallet[-4:]
