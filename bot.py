@@ -150,8 +150,9 @@ async def resolver_loop():
 KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("📂 Positions"),    KeyboardButton("📋 Journal")],
-        [KeyboardButton("💰 P&L"),          KeyboardButton("ℹ️ Status")],
+        [KeyboardButton("💰 P&L"),          KeyboardButton("🔄 Refresh")],
         [KeyboardButton("💵 Live P&L"),     KeyboardButton("📒 Live Journal")],
+        [KeyboardButton("💼 Balance"),       KeyboardButton("ℹ️ Status")],
         [KeyboardButton("🚨 Kill Switch"),  KeyboardButton("✅ Resume")],
         [KeyboardButton("🔄 Reset")],
     ],
@@ -336,7 +337,60 @@ async def cmd_livejournal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{emoji} | {sym} {side} | ${pnl:+.4f} | {reason}")
     await update.message.reply_text("\n".join(lines))
 
+async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show USDC and MATIC balance on Polygon."""
+    if update.effective_user.id != ALLOWED_USER: return
+    wallet = os.getenv("WALLET_FUNDER_ADDRESS", "")
+    if not wallet:
+        await update.message.reply_text("WALLET_FUNDER_ADDRESS not set in Railway env vars.")
+        return
+    await update.message.reply_text("Fetching balance...")
+    try:
+        async with __import__("aiohttp").ClientSession() as session:
+            # USDC on Polygon — contract 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
+            USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            # Use Polygonscan API (free, no key needed for basic calls)
+            usdc_url = (
+                f"https://api.polygonscan.com/api"
+                f"?module=account&action=tokenbalance"
+                f"&contractaddress={USDC_CONTRACT}"
+                f"&address={wallet}"
+                f"&tag=latest"
+            )
+            matic_url = (
+                f"https://api.polygonscan.com/api"
+                f"?module=account&action=balance"
+                f"&address={wallet}"
+                f"&tag=latest"
+            )
+            async with session.get(usdc_url, timeout=__import__("aiohttp").ClientTimeout(total=8)) as r:
+                usdc_data = await r.json()
+            async with session.get(matic_url, timeout=__import__("aiohttp").ClientTimeout(total=8)) as r:
+                matic_data = await r.json()
+            # USDC has 6 decimals on Polygon
+            usdc_raw  = int(usdc_data.get("result", "0") or "0")
+            usdc_bal  = usdc_raw / 1_000_000
+            # MATIC has 18 decimals
+            matic_raw = int(matic_data.get("result", "0") or "0")
+            matic_bal = matic_raw / 10**18
+            mode    = "🚨 KILL SWITCH ON" if KILL_SWITCH else ("💵 LIVE" if not PAPER_MODE else "📄 PAPER")
+            short   = wallet[:6] + "..." + wallet[-4:]
+            await update.message.reply_text(
+                f"💼 Wallet Balance\n"
+                f"Address: {short}\n"
+                f"Network: Polygon\n"
+                f"\n"
+                f"💵 USDC: ${usdc_bal:.2f}\n"
+                f"⛽ MATIC: {matic_bal:.4f}\n"
+                f"\n"
+                f"Mode: {mode}"
+            )
+    except Exception as e:
+        logger.error(f"Balance fetch error: {e}")
+        await update.message.reply_text(f"Balance fetch failed: {e}")
+
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
 
 
     if update.effective_user.id != ALLOWED_USER: return
@@ -383,9 +437,11 @@ def main():
         elif text == "ℹ️ Status":       await cmd_status(update, context)
         elif text == "💵 Live P&L":     await cmd_livepnl(update, context)
         elif text == "📒 Live Journal": await cmd_livejournal(update, context)
-        elif text == "🚨 Kill Switch":  await cmd_kill(update, context)
+        elif text == "💼 Balance":         await cmd_balance(update, context)
+        elif text == "🚨 Kill Switch":     await cmd_kill(update, context)
         elif text == "✅ Resume":       await cmd_resume(update, context)
-        elif text == "🔄 Reset":        await cmd_reset(update, context)
+        elif text == "🔄 Refresh":       await cmd_refresh(update, context)
+        elif text == "🔄 Reset":         await cmd_reset(update, context)
 
     application.add_handler(CommandHandler("start",     cmd_start))
 
@@ -394,6 +450,7 @@ def main():
     application.add_handler(CommandHandler("pnl",       cmd_pnl))
     application.add_handler(CommandHandler("reset",        cmd_reset))
     application.add_handler(CommandHandler("status",       cmd_status))
+    application.add_handler(CommandHandler("balance",      cmd_balance))
     application.add_handler(CommandHandler("kill",         cmd_kill))
     application.add_handler(CommandHandler("resume",       cmd_resume))
     application.add_handler(CommandHandler("livepnl",      cmd_livepnl))
