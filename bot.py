@@ -164,20 +164,24 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_journal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER: return
     conn = get_conn()
+    all_rows = conn.execute(
+        "SELECT * FROM trades WHERE status='closed'"
+    ).fetchall()
     rows = conn.execute(
         "SELECT * FROM trades WHERE status='closed' ORDER BY closed_at DESC LIMIT 30"
     ).fetchall()
     conn.close()
+    all_trades = [dict(r) for r in all_rows]
     trades = [dict(r) for r in rows]
     if not trades:
         await update.message.reply_text("No closed trades yet.")
         return
-    wins   = [t for t in trades if (t.get("pnl") or 0) > 0]
-    losses = [t for t in trades if (t.get("pnl") or 0) < 0]
-    total  = sum(t.get("pnl") or 0 for t in trades)
-    wr     = len(wins) / len(trades) * 100 if trades else 0
+    wins   = [t for t in all_trades if (t.get("pnl") or 0) > 0]
+    losses = [t for t in all_trades if (t.get("pnl") or 0) < 0]
+    total  = sum(t.get("pnl") or 0 for t in all_trades)
+    wr     = len(wins) / len(all_trades) * 100 if all_trades else 0
     lines  = [
-        f"Journal ({len(trades)} trades)",
+        f"Journal ({len(all_trades)} trades | showing last {len(trades)})",
         f"W:{len(wins)} L:{len(losses)} | P&L:${total:+.2f} | WR:{wr:.0f}%",
         ""
     ]
