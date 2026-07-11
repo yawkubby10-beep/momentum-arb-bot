@@ -60,9 +60,9 @@ ERC20_ABI = [
 
 ONRAMP_ABI = [
     {"inputs": [
-        {"name":"asset","type":"address"},
-        {"name":"amount","type":"uint256"},
-        {"name":"recipient","type":"address"}
+        {"name":"_asset","type":"address"},
+        {"name":"_to","type":"address"},
+        {"name":"_amount","type":"uint256"}
      ],
      "name": "wrap","outputs": [],
      "stateMutability": "nonpayable","type": "function"},
@@ -202,7 +202,7 @@ def main():
         usdc_amount = int(usdc_bal * 1_000_000)
         print(f"\nStep 2: Wrapping ${usdc_bal:.4f} USDC → pUSD...")
         receipt = send_tx(w3, account,
-            ramp.functions.wrap(usdca, usdc_amount, wallet),
+            ramp.functions.wrap(usdca, wallet, usdc_amount),
             gas=200000
         )
         if receipt.status != 1:
