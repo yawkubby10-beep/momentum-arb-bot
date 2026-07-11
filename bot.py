@@ -390,7 +390,7 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Network: Polygon\n"
                 f"\n"
                 f"💵 USDC: ${usdc_bal:.2f} {usdc_detail}\n"
-                f"⛽ MATIC: {matic_bal:.4f}\n"
+                f"⛽ MATIC: {matic_bal:.6f}\n"
                 f"\n"
                 f"Mode: {mode}"
             )
