@@ -24,6 +24,7 @@ from aiohttp import web
 
 from core.momentum_arb import MomentumArbStrategy
 from core.resolver import MomentumResolver
+from core.live_executor import LiveExecutor
 from core.database import (
     init_db, get_open_trades, get_performance,
     is_daily_loss_limit_hit, get_conn
@@ -42,9 +43,10 @@ SCAN_INTERVAL  = 30   # seconds between price scans
 RESOLVE_INTERVAL = 60 # seconds between resolver runs
 
 # Global strategy instances
-mom      = MomentumArbStrategy()
-resolver = MomentumResolver()
-app_ref  = None  # Telegram app reference
+mom           = MomentumArbStrategy()
+resolver      = MomentumResolver()
+live_executor = LiveExecutor()
+app_ref       = None  # Telegram app reference
 
 # ── Alert helper ──────────────────────────────────────────────────────────────
 async def alert(text: str):
@@ -75,11 +77,22 @@ async def momentum_loop():
                     if any(t.get("symbol")==sym and t.get("side","").upper()==opp for t in existing):
                         logger.info(f"Skip {sym} {side} — hedge prevention")
                         continue
-                    # Open trade
+                    # Open trade: live or paper
                     from core.database import open_trade
+                    entry_price = sig["best_price"]  # default (paper)
+
+                    if not PAPER_MODE:
+                        # LIVE: place real FAK order on Polymarket CLOB
+                        fill = await live_executor.place_entry(sig)
+                        if fill is None:
+                            logger.info(f"Live entry failed/unfilled for {sym} {side} — skipping")
+                            continue
+                        entry_price = fill["actual_price"]
+                        logger.info(f"Live fill: {sym} {side} @ {entry_price:.4f} (order {fill['order_id'][:16]}...)")
+
                     tid = open_trade(
                         "momentum_arb", sym, side,
-                        sig["best_price"], sig.get("stake", 3.0),
+                        entry_price, sig.get("stake", 10.0),
                         stop_loss=sig.get("stop_loss"),
                         take_profit=sig.get("take_profit"),
                         metadata={
@@ -90,16 +103,19 @@ async def momentum_loop():
                             "best_token_id": sig.get("best_token_id", ""),
                             "yes_token_id":  sig.get("yes_token_id", ""),
                             "no_token_id":   sig.get("no_token_id", ""),
+                            "live_order_id": fill["order_id"] if not PAPER_MODE and fill else "",
                         },
                         paper=PAPER_MODE
                     )
                     if tid:
+                        mode_tag = "📄 PAPER" if PAPER_MODE else "💵 LIVE"
                         side_emoji = "📈" if side == "YES" else "📉"
                         await alert(
-                            f"{side_emoji} Momentum Arb\n"
+                            f"{side_emoji} Momentum Arb [{mode_tag}]\n"
                             f"{sym} {sig.get('momentum','')}\n"
                             f"Market lagging: {side}={sig.get('yes_prob',0):.0f}%\n"
-                            f"Stake: ${sig.get('stake',3):.1f} | "
+                            f"Entry: ${entry_price:.4f} | Stake: ${sig.get('stake',10):.1f}\n"
+                            f"SL: ${sig.get('stop_loss',0):.4f} | TP: ${sig.get('take_profit',0):.4f}\n"
                             f"{sig.get('secs_remaining',0):.0f}s remaining"
                         )
         except Exception as e:
@@ -241,6 +257,14 @@ async def on_startup(app):
     global app_ref
     app_ref = app
     init_db()
+    if not PAPER_MODE:
+        ok = await live_executor.initialise()
+        if not ok:
+            await app.bot.send_message(
+                chat_id=int(os.getenv("ALLOWED_USER_ID","0")),
+                text="⚠️ LiveExecutor failed to initialise — check WALLET_PRIVATE_KEY and WALLET_FUNDER_ADDRESS. Running in PAPER MODE as fallback."
+            )
+            logger.error("LiveExecutor init failed — will paper trade only")
     asyncio.create_task(momentum_loop())
     asyncio.create_task(resolver_loop())
     await alert(
