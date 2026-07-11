@@ -127,8 +127,18 @@ def main():
     private_key = os.getenv("WALLET_PRIVATE_KEY", "").strip()
     if not private_key:
         private_key = input("Paste your Polygon private key: ").strip()
-    if not private_key.startswith("0x"):
-        private_key = "0x" + private_key
+    # Clean key — strip whitespace, newlines, any non-hex chars
+    private_key = private_key.strip().replace(" ", "").replace("\n", "").replace("\r", "")
+    # Remove 0x prefix for cleaning, re-add after
+    if private_key.startswith("0x") or private_key.startswith("0X"):
+        private_key = private_key[2:]
+    # Keep only valid hex characters
+    private_key = "".join(c for c in private_key if c in "0123456789abcdefABCDEF")
+    if len(private_key) != 64:
+        print(f"ERROR: Private key must be 64 hex characters, got {len(private_key)}")
+        print("Make sure you copied the full key from MetaMask without spaces")
+        sys.exit(1)
+    private_key = "0x" + private_key
 
     # Connect
     print("\nConnecting to Polygon...")
