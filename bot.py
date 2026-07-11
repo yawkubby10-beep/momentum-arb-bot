@@ -47,6 +47,7 @@ mom           = MomentumArbStrategy()
 resolver      = MomentumResolver()
 live_executor = LiveExecutor()
 app_ref       = None  # Telegram app reference
+KILL_SWITCH   = False  # Set True to block all new live orders
 
 # ── Alert helper ──────────────────────────────────────────────────────────────
 async def alert(text: str):
@@ -82,6 +83,9 @@ async def momentum_loop():
                     entry_price = sig["best_price"]  # default (paper)
 
                     if not PAPER_MODE:
+                        if KILL_SWITCH:
+                            logger.warning(f"KILL SWITCH ACTIVE — blocking live order for {sym} {side}")
+                            continue
                         # LIVE: place real FAK order on Polymarket CLOB
                         fill = await live_executor.place_entry(sig)
                         if fill is None:
@@ -145,8 +149,10 @@ async def resolver_loop():
 # ── Telegram commands ─────────────────────────────────────────────────────────
 KEYBOARD = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("📂 Positions"), KeyboardButton("📋 Journal")],
-        [KeyboardButton("💰 P&L"),       KeyboardButton("ℹ️ Status")],
+        [KeyboardButton("📂 Positions"),    KeyboardButton("📋 Journal")],
+        [KeyboardButton("💰 P&L"),          KeyboardButton("ℹ️ Status")],
+        [KeyboardButton("💵 Live P&L"),     KeyboardButton("📒 Live Journal")],
+        [KeyboardButton("🚨 Kill Switch"),  KeyboardButton("✅ Resume")],
         [KeyboardButton("🔄 Reset")],
     ],
     resize_keyboard=True,
@@ -243,7 +249,95 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=KEYBOARD
     )
 
+async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Emergency kill switch — cancels all live orders and blocks new ones."""
+    global KILL_SWITCH
+    if update.effective_user.id != ALLOWED_USER: return
+    KILL_SWITCH = True
+    # Cancel all open CLOB orders
+    cancelled = 0
+    if not PAPER_MODE and live_executor._initialized and live_executor._client:
+        try:
+            resp = await asyncio.get_event_loop().run_in_executor(
+                None, live_executor._client.cancel_all
+            )
+            cancelled = len(resp) if isinstance(resp, list) else 0
+            logger.info(f"Kill switch: cancelled {cancelled} open orders on CLOB")
+        except Exception as e:
+            logger.error(f"Kill switch: cancel_all error: {e}")
+    await update.message.reply_text(
+        f"🚨 KILL SWITCH ACTIVATED\n"
+        f"All new live orders BLOCKED\n"
+        f"CLOB orders cancelled: {cancelled}\n"
+        f"Bot still running — use /resume to re-enable trading"
+    )
+
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Resume live trading after kill switch."""
+    global KILL_SWITCH
+    if update.effective_user.id != ALLOWED_USER: return
+    KILL_SWITCH = False
+    await update.message.reply_text(
+        "✅ Kill switch DEACTIVATED\n"
+        "Live trading resumed"
+    )
+
+async def cmd_livepnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """P&L for live trades only (paper=0)."""
+    if update.effective_user.id != ALLOWED_USER: return
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM trades WHERE status='closed' AND paper=0").fetchall()
+    conn.close()
+    trades = [dict(r) for r in rows]
+    if not trades:
+        await update.message.reply_text("No live trades closed yet.")
+        return
+    wins   = [t for t in trades if (t.get("pnl") or 0) > 0]
+    losses = [t for t in trades if (t.get("pnl") or 0) < 0]
+    total  = sum(t.get("pnl") or 0 for t in trades)
+    wr     = len(wins) / len(trades) * 100 if trades else 0
+    status = "🚨 KILL SWITCH ON" if KILL_SWITCH else ("💵 LIVE" if not PAPER_MODE else "📄 PAPER")
+    await update.message.reply_text(
+        f"💵 Live P&L [{status}]\n"
+        f"Trades: {len(trades)} | W:{len(wins)} L:{len(losses)}\n"
+        f"Win Rate: {wr:.1f}%\n"
+        f"Total P&L: ${total:+.2f}"
+    )
+
+async def cmd_livejournal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Journal for live trades only (paper=0)."""
+    if update.effective_user.id != ALLOWED_USER: return
+    conn = get_conn()
+    all_rows = conn.execute("SELECT * FROM trades WHERE status='closed' AND paper=0").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM trades WHERE status='closed' AND paper=0 ORDER BY closed_at DESC LIMIT 30"
+    ).fetchall()
+    conn.close()
+    all_trades = [dict(r) for r in all_rows]
+    trades = [dict(r) for r in rows]
+    if not trades:
+        await update.message.reply_text("No live trades closed yet.")
+        return
+    wins  = [t for t in all_trades if (t.get("pnl") or 0) > 0]
+    losses= [t for t in all_trades if (t.get("pnl") or 0) < 0]
+    total = sum(t.get("pnl") or 0 for t in all_trades)
+    wr    = len(wins) / len(all_trades) * 100 if all_trades else 0
+    lines = [
+        f"💵 Live Journal ({len(all_trades)} trades | showing last {len(trades)})",
+        f"W:{len(wins)} L:{len(losses)} | P&L:${total:+.2f} | WR:{wr:.0f}%",
+        ""
+    ]
+    for t in trades:
+        pnl    = t.get("pnl") or 0
+        sym    = t.get("symbol", "")
+        side   = t.get("side", "")
+        reason = t.get("exit_reason", "")
+        emoji  = "WIN" if pnl > 0 else ("NEUTRAL" if pnl == 0 else "LOSS")
+        lines.append(f"{emoji} | {sym} {side} | ${pnl:+.4f} | {reason}")
+    await update.message.reply_text("\n".join(lines))
+
 async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
 
     if update.effective_user.id != ALLOWED_USER: return
     conn = get_conn()
@@ -283,19 +377,27 @@ def main():
     async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != ALLOWED_USER: return
         text = update.message.text
-        if text == "📂 Positions":  await cmd_positions(update, context)
-        elif text == "📋 Journal":  await cmd_journal(update, context)
-        elif text == "💰 P&L":      await cmd_pnl(update, context)
-        elif text == "ℹ️ Status":   await cmd_status(update, context)
-        elif text == "🔄 Reset":    await cmd_reset(update, context)
+        if text == "📂 Positions":      await cmd_positions(update, context)
+        elif text == "📋 Journal":      await cmd_journal(update, context)
+        elif text == "💰 P&L":          await cmd_pnl(update, context)
+        elif text == "ℹ️ Status":       await cmd_status(update, context)
+        elif text == "💵 Live P&L":     await cmd_livepnl(update, context)
+        elif text == "📒 Live Journal": await cmd_livejournal(update, context)
+        elif text == "🚨 Kill Switch":  await cmd_kill(update, context)
+        elif text == "✅ Resume":       await cmd_resume(update, context)
+        elif text == "🔄 Reset":        await cmd_reset(update, context)
 
     application.add_handler(CommandHandler("start",     cmd_start))
 
     application.add_handler(CommandHandler("positions", cmd_positions))
     application.add_handler(CommandHandler("journal",   cmd_journal))
     application.add_handler(CommandHandler("pnl",       cmd_pnl))
-    application.add_handler(CommandHandler("reset",     cmd_reset))
-    application.add_handler(CommandHandler("status",    cmd_status))
+    application.add_handler(CommandHandler("reset",        cmd_reset))
+    application.add_handler(CommandHandler("status",       cmd_status))
+    application.add_handler(CommandHandler("kill",         cmd_kill))
+    application.add_handler(CommandHandler("resume",       cmd_resume))
+    application.add_handler(CommandHandler("livepnl",      cmd_livepnl))
+    application.add_handler(CommandHandler("livejournal",  cmd_livejournal))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, button_handler))
 
 
