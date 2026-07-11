@@ -24,7 +24,7 @@ from aiohttp import web
 
 from core.momentum_arb import MomentumArbStrategy
 from core.resolver import MomentumResolver
-from core.live_executor import LiveExecutor
+from core.live_executor import LiveExecutorV2 as LiveExecutor
 from core.database import (
     init_db, get_open_trades, get_performance,
     is_daily_loss_limit_hit, get_conn
@@ -45,7 +45,7 @@ RESOLVE_INTERVAL = 60 # seconds between resolver runs
 # Global strategy instances
 mom           = MomentumArbStrategy()
 resolver      = MomentumResolver()
-live_executor = LiveExecutor()
+live_executor = LiveExecutorV2()
 app_ref       = None  # Telegram app reference
 KILL_SWITCH   = False  # Set True to block all new live orders
 
