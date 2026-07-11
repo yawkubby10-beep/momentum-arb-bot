@@ -45,7 +45,7 @@ RESOLVE_INTERVAL = 60 # seconds between resolver runs
 # Global strategy instances
 mom           = MomentumArbStrategy()
 resolver      = MomentumResolver()
-live_executor = LiveExecutorV2()
+live_executor = LiveExecutor()
 app_ref       = None  # Telegram app reference
 KILL_SWITCH   = False  # Set True to block all new live orders
 
