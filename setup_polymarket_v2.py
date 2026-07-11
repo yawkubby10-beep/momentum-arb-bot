@@ -83,14 +83,18 @@ def connect_polygon():
 
 def send_tx(w3, account, fn_call, gas=100000):
     """Build, sign, send a transaction and wait for receipt."""
-    nonce     = w3.eth.get_transaction_count(account.address)
-    gas_price = w3.eth.gas_price
-    txn       = fn_call.build_transaction({
-        "chainId":  137,
-        "gas":      gas,
-        "gasPrice": gas_price,
-        "nonce":    nonce,
-        "from":     account.address,
+    nonce         = w3.eth.get_transaction_count(account.address)
+    # Use 2x the current base fee to ensure inclusion
+    base_fee      = w3.eth.get_block("latest")["baseFeePerGas"]
+    max_fee       = base_fee * 2
+    priority_fee  = w3.to_wei(30, "gwei")  # 30 gwei tip
+    txn           = fn_call.build_transaction({
+        "chainId":             137,
+        "gas":                 gas,
+        "maxFeePerGas":        max_fee,
+        "maxPriorityFeePerGas": priority_fee,
+        "nonce":               nonce,
+        "from":                account.address,
     })
     signed  = w3.eth.account.sign_transaction(txn, account.key)
     tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
