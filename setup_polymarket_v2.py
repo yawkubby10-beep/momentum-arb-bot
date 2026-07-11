@@ -31,7 +31,7 @@ except ImportError:
 
 # ── Addresses (official Polymarket V2 docs, July 2026) ────────────────────────
 WALLET_ADDRESS   = "0x9b21ed1D2D87dB33d3588c3c2CFF64E0b67180E5"
-USDC_NATIVE      = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"  # Native USDC on Polygon
+USDC_NATIVE      = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC.e (bridged) on Polygon — accepted by CollateralOnramp
 PUSD_CONTRACT    = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"  # Polymarket USD
 ONRAMP           = "0x93070a847efEf7F70739046A929D47a521F5B8ee"  # CollateralOnramp
 CTF_EXCHANGE_V2  = "0xE111180000d2663C0091e4f400237545B87B996B"  # CTF Exchange V2
@@ -171,7 +171,7 @@ def main():
     matic_bal = w3.eth.get_balance(wallet) / 10**18
 
     print(f"\nWallet: {WALLET_ADDRESS}")
-    print(f"USDC (native):  ${usdc_bal:.4f}")
+    print(f"USDC.e:         ${usdc_bal:.4f}")
     print(f"pUSD:           ${pusd_bal:.4f}")
     print(f"MATIC:          {matic_bal:.6f}")
 
