@@ -100,6 +100,17 @@ def send_tx(w3, account, fn_call, gas=100000):
     tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
     print(f"  TX: {tx_hash.hex()}")
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+    if receipt.status != 1:
+        # Try to get revert reason
+        try:
+            tx = w3.eth.get_transaction(tx_hash)
+            w3.eth.call({
+                "to": tx["to"], "from": tx["from"],
+                "data": tx["input"], "value": tx["value"],
+                "gas": tx["gas"],
+            }, receipt["blockNumber"])
+        except Exception as revert_err:
+            print(f"  Revert reason: {revert_err}")
     return receipt
 
 def sync_clob_balance(private_key):
