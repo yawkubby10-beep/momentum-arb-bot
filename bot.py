@@ -347,31 +347,41 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Fetching balance...")
     try:
         async with __import__("aiohttp").ClientSession() as session:
-            # Use Polygon RPC directly — no API key needed
-            POLYGON_RPC   = "https://polygon-rpc.com"
-            # Check both USDC contracts: USDC.e (bridged) and native USDC
-            USDC_BRIDGED  = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-            USDC_NATIVE   = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
-            timeout = __import__("aiohttp").ClientTimeout(total=8)
-            async def get_token_bal(contract):
-                data_hex = "0x70a08231" + wallet[2:].lower().zfill(64)
-                payload  = {"jsonrpc":"2.0","id":1,"method":"eth_call",
-                            "params":[{"to":contract,"data":data_hex},"latest"]}
-                async with session.post(POLYGON_RPC, json=payload, timeout=timeout) as rr:
-                    d = await rr.json(content_type=None)
-                    raw = int(d.get("result","0x0") or "0x0", 16)
-                    return raw / 1_000_000
-            matic_payload = {"jsonrpc":"2.0","id":2,"method":"eth_getBalance",
-                             "params":[wallet,"latest"]}
-            usdc_bridged = await get_token_bal(USDC_BRIDGED)
-            usdc_native  = await get_token_bal(USDC_NATIVE)
+            # Try multiple Polygon RPC endpoints until one works
+            RPCS = [
+                "https://polygon-rpc.com",
+                "https://rpc.ankr.com/polygon",
+                "https://polygon-mainnet.public.blastapi.io",
+                "https://1rpc.io/matic",
+                "https://polygon.llamarpc.com",
+            ]
+            USDC_BRIDGED = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            USDC_NATIVE  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+            timeout = __import__("aiohttp").ClientTimeout(total=6)
+
+            async def rpc_call(payload):
+                for rpc in RPCS:
+                    try:
+                        async with session.post(rpc, json=payload, timeout=timeout) as rr:
+                            d = await rr.json(content_type=None)
+                            if d.get("result") is not None:
+                                return d
+                    except Exception:
+                        continue
+                return {"result": "0x0"}
+
+            wallet_lower = wallet.lower()
+            data_hex = "0x70a08231" + wallet_lower[2:].zfill(64)
+
+            d1 = await rpc_call({"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":USDC_BRIDGED,"data":data_hex},"latest"]})
+            d2 = await rpc_call({"jsonrpc":"2.0","id":2,"method":"eth_call","params":[{"to":USDC_NATIVE,"data":data_hex},"latest"]})
+            d3 = await rpc_call({"jsonrpc":"2.0","id":3,"method":"eth_getBalance","params":[wallet,"latest"]})
+
+            usdc_bridged = int(d1.get("result","0x0") or "0x0", 16) / 1_000_000
+            usdc_native  = int(d2.get("result","0x0") or "0x0", 16) / 1_000_000
             usdc_bal     = usdc_bridged + usdc_native
-            async with session.post(POLYGON_RPC, json=matic_payload, timeout=timeout) as r:
-                matic_resp = await r.json(content_type=None)
-            matic_hex = matic_resp.get("result", "0x0") or "0x0"
-            matic_raw = int(matic_hex, 16)
-            matic_bal = matic_raw / 10**18
-            usdc_detail = f"(USDC.e: ${usdc_bridged:.2f} + Native: ${usdc_native:.2f})" if usdc_bridged or usdc_native else ""
+            matic_bal    = int(d3.get("result","0x0") or "0x0", 16) / 10**18
+            usdc_detail  = f"(USDC.e: ${usdc_bridged:.2f} | Native: ${usdc_native:.2f})"
             mode    = "🚨 KILL SWITCH ON" if KILL_SWITCH else ("💵 LIVE" if not PAPER_MODE else "📄 PAPER")
             short   = wallet[:6] + "..." + wallet[-4:]
             await update.message.reply_text(
