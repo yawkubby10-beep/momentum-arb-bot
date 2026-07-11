@@ -2,4 +2,5 @@ python-telegram-bot[job-queue]==21.3
 aiohttp==3.9.5
 python-dotenv==1.0.1
 numpy==1.26.4
-py-clob-client==0.34.6
+py-clob-client-v2==1.0.2
+web3==7.6.0
