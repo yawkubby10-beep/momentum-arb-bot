@@ -23,9 +23,10 @@ from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
 
-# Route orders through São Paulo proxy to bypass Railway geoblock
-CLOB_HOST          = "https://polymarket-proxy-black-echo-5111.fly.dev"
-CLOB_DIRECT        = "https://clob.polymarket.com"  # kept for reference
+# Direct CLOB for auth (signature verification requires direct connection)
+CLOB_HOST          = "https://clob.polymarket.com"
+# São Paulo proxy for order placement only (bypasses Railway geoblock)
+CLOB_PROXY         = "https://polymarket-proxy-black-echo-5111.fly.dev"
 CHAIN_ID           = 137
 TICK_SIZE          = "0.01"    # 15-min crypto markets use 0.01
 NEG_RISK           = False     # 15-min BTC/ETH/SOL markets are not neg-risk
@@ -234,12 +235,18 @@ class LiveExecutorV2:
             )
 
             loop = asyncio.get_event_loop()
-            resp = await loop.run_in_executor(
-                None,
-                lambda: self._client.create_and_post_market_order(
-                    order_args, options, OrderType.FAK
+            # Temporarily switch client host to proxy for order submission
+            original_host = self._client.host
+            self._client.host = CLOB_PROXY
+            try:
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda: self._client.create_and_post_market_order(
+                        order_args, options, OrderType.FAK
+                    )
                 )
-            )
+            finally:
+                self._client.host = original_host  # restore
 
             logger.info(f"LiveExecutorV2: FAK response: {resp}")
 
@@ -357,12 +364,17 @@ class LiveExecutorV2:
             )
 
             loop = asyncio.get_event_loop()
-            resp = await loop.run_in_executor(
-                None,
-                lambda: self._client.create_and_post_order(
-                    order_args, options, OrderType.GTC
+            original_host = self._client.host
+            self._client.host = CLOB_PROXY
+            try:
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda: self._client.create_and_post_order(
+                        order_args, options, OrderType.GTC
+                    )
                 )
-            )
+            finally:
+                self._client.host = original_host
 
             logger.info(f"LiveExecutorV2: exit GTC response: {resp}")
 
