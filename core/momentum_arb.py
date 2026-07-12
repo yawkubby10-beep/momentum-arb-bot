@@ -206,6 +206,9 @@ class MomentumArbStrategy:
         sixty_ago = [(ts, p) for ts, p in history if now_ts - ts >= 55]
         if not sixty_ago:
             return None
+        old_price   = sixty_ago[0][1]
+        pct_change  = (current_price - old_price) / old_price if old_price > 0 else 0
+        logger.info(f"Momentum check: {symbol} {old_price:.2f}→{current_price:.2f} ({pct_change*100:+.3f}%) threshold={MOMENTUM_THRESHOLD*100:.2f}%")
 
         old_price = sixty_ago[0][1]
         change    = (current_price - old_price) / old_price
