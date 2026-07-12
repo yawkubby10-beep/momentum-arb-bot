@@ -23,7 +23,9 @@ from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
 
-CLOB_HOST          = "https://clob.polymarket.com"
+# Route orders through São Paulo proxy to bypass Railway geoblock
+CLOB_HOST          = "https://polymarket-proxy-black-echo-5111.fly.dev"
+CLOB_DIRECT        = "https://clob.polymarket.com"  # kept for reference
 CHAIN_ID           = 137
 TICK_SIZE          = "0.01"    # 15-min crypto markets use 0.01
 NEG_RISK           = False     # 15-min BTC/ETH/SOL markets are not neg-risk
