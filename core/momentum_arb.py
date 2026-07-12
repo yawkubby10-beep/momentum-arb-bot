@@ -330,11 +330,12 @@ class MomentumArbStrategy:
             if not market:
                 continue
 
-            # Skip near-resolved markets
+            # Skip near-resolved markets (loosened from 0.05 to 0.03)
             yes_p = float(market.get("yes_price") or 0.5)
             no_p  = float(market.get("no_price") or 0.5)
-            if yes_p < 0.05 or yes_p > 0.95 or no_p < 0.05 or no_p > 0.95:
-                logger.debug(f"Skip {crypto}: near-resolved YES={yes_p:.3f} NO={no_p:.3f}")
+            logger.info(f"Market prices: {crypto} YES={yes_p:.3f} NO={no_p:.3f}")
+            if yes_p < 0.03 or yes_p > 0.97 or no_p < 0.03 or no_p > 0.97:
+                logger.info(f"Skip {crypto}: near-resolved YES={yes_p:.3f} NO={no_p:.3f}")
                 continue
 
             # Check if Polymarket hasn't priced in the momentum yet
