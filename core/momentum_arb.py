@@ -86,7 +86,7 @@ class MomentumArbStrategy:
         # Try KuCoin first
         prices = await self._fetch_kucoin(session)
         if prices:
-            logger.info(f"Momentum arb: got {len(prices)} prices from KuCoin: {list(prices.keys())}")
+            logger.info(f"✅ Momentum arb: got {len(prices)} prices from KuCoin: {list(prices.keys())}")
             return prices
 
         # Fallback 1: OKX
@@ -117,7 +117,7 @@ class MomentumArbStrategy:
             for sym, ksym in kucoin_map.items():
                 async with session.get(
                     "https://api.kucoin.com/api/v1/market/orderbook/level1",
-                    params={"symbol": ksym}, timeout=aiohttp.ClientTimeout(total=5)
+                    params={"symbol": ksym}, timeout=aiohttp.ClientTimeout(total=8)
                 ) as r:
                     if r.status == 200:
                         d = await r.json()
