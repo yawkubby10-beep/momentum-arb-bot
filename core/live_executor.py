@@ -43,6 +43,7 @@ class LiveExecutorV2:
 
     def __init__(self):
         self._client            = None
+        self._direct_client     = None  # for heartbeat (direct CLOB)
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._heartbeat_id: str = ""
         self._initialized: bool = False
@@ -75,6 +76,16 @@ class LiveExecutorV2:
         # Step 2: trading client uses PROXY as host — all orders go via São Paulo
         client = ClobClient(
             host=CLOB_PROXY,
+            chain_id=CHAIN_ID,
+            key=self._private_key,
+            creds=creds,
+            signature_type=0,
+            funder=self._funder,
+        )
+
+        # Step 3b: direct client for heartbeat (must use same host as auth)
+        self._direct_client = ClobClient(
+            host=CLOB_HOST,
             chain_id=CHAIN_ID,
             key=self._private_key,
             creds=creds,
@@ -125,9 +136,10 @@ class LiveExecutorV2:
                 if self._killed:
                     continue  # keep loop alive but don't send if killed
                 loop = asyncio.get_event_loop()
+                hb_client = self._direct_client or self._client
                 resp = await loop.run_in_executor(
                     None,
-                    lambda: self._client.post_heartbeat(self._heartbeat_id)
+                    lambda: hb_client.post_heartbeat(self._heartbeat_id)
                 )
                 if isinstance(resp, dict):
                     self._heartbeat_id = resp.get("heartbeat_id", self._heartbeat_id)
