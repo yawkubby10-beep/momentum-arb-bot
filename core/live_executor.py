@@ -25,8 +25,6 @@ logger = logging.getLogger(__name__)
 
 # Direct CLOB — Hetzner Finland is not geoblocked by Polymarket
 CLOB_HOST          = "https://clob.polymarket.com"
-# Deposit wallet — derived from EOA, holds pUSD, required for V2 trading
-DEPOSIT_WALLET     = "0x720f2ee6769344F548377878aD4b823aD5751a0c"
 CHAIN_ID           = 137
 TICK_SIZE          = "0.01"    # 15-min crypto markets use 0.01
 NEG_RISK           = False     # 15-min BTC/ETH/SOL markets are not neg-risk
@@ -73,15 +71,14 @@ class LiveExecutorV2:
         )
         creds = temp.create_or_derive_api_key()
 
-        # Step 2: trading client uses POLY_1271 + deposit wallet (V2 requirement)
-        from py_clob_client_v2 import SignatureTypeV2
+        # Step 2: trading client — EOA signature type 0
         client = ClobClient(
             host=CLOB_HOST,
             chain_id=CHAIN_ID,
             key=self._private_key,
             creds=creds,
-            signature_type=SignatureTypeV2.POLY_1271,
-            funder=DEPOSIT_WALLET,
+            signature_type=0,
+            funder=self._funder,
         )
 
         # Step 3b: direct client for heartbeat (must use same host as auth)
@@ -94,7 +91,7 @@ class LiveExecutorV2:
             funder=self._funder,
         )
 
-        # Step 3: sync pUSD balance for deposit wallet (signature_type=3)
+        # Step 3: sync pUSD balance
         try:
             client.update_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
