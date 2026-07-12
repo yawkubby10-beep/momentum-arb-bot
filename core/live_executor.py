@@ -62,19 +62,19 @@ class LiveExecutorV2:
         if not self._funder:
             raise ValueError("WALLET_FUNDER_ADDRESS env var not set")
 
-        # Step 1: derive API credentials (L1 auth)
+        # Step 1: derive API credentials using direct CLOB (auth needs direct connection)
         temp = ClobClient(
             host=CLOB_HOST,
             chain_id=CHAIN_ID,
             key=self._private_key,
-            signature_type=0,     # EOA — MetaMask wallet
+            signature_type=0,
             funder=self._funder,
         )
         creds = temp.create_or_derive_api_key()
 
-        # Step 2: full authenticated client (L1 + L2)
+        # Step 2: trading client uses PROXY as host — all orders go via São Paulo
         client = ClobClient(
-            host=CLOB_HOST,
+            host=CLOB_PROXY,
             chain_id=CHAIN_ID,
             key=self._private_key,
             creds=creds,
@@ -82,9 +82,10 @@ class LiveExecutorV2:
             funder=self._funder,
         )
 
-        # Step 3: sync pUSD balance with CLOB cache
+        # Step 3: sync pUSD balance — use temp client (direct CLOB)
         try:
-            client.update_balance_allowance(
+            temp.set_api_creds(creds)
+            temp.update_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             )
             logger.info("LiveExecutorV2: pUSD balance synced with CLOB")
@@ -235,18 +236,12 @@ class LiveExecutorV2:
             )
 
             loop = asyncio.get_event_loop()
-            # Temporarily switch client host to proxy for order submission
-            original_host = self._client.host
-            self._client.host = CLOB_PROXY
-            try:
-                resp = await loop.run_in_executor(
-                    None,
-                    lambda: self._client.create_and_post_market_order(
-                        order_args, options, OrderType.FAK
-                    )
+            resp = await loop.run_in_executor(
+                None,
+                lambda: self._client.create_and_post_market_order(
+                    order_args, options, OrderType.FAK
                 )
-            finally:
-                self._client.host = original_host  # restore
+            )
 
             logger.info(f"LiveExecutorV2: FAK response: {resp}")
 
@@ -364,17 +359,12 @@ class LiveExecutorV2:
             )
 
             loop = asyncio.get_event_loop()
-            original_host = self._client.host
-            self._client.host = CLOB_PROXY
-            try:
-                resp = await loop.run_in_executor(
-                    None,
-                    lambda: self._client.create_and_post_order(
-                        order_args, options, OrderType.GTC
-                    )
+            resp = await loop.run_in_executor(
+                None,
+                lambda: self._client.create_and_post_order(
+                    order_args, options, OrderType.GTC
                 )
-            finally:
-                self._client.host = original_host
+            )
 
             logger.info(f"LiveExecutorV2: exit GTC response: {resp}")
 
