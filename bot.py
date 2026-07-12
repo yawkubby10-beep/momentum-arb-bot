@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 TOKEN          = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_USER   = int(os.getenv("ALLOWED_USER_ID", "0"))
 PAPER_MODE     = os.getenv("PAPER_MODE", "true").lower() == "true"
-SCAN_INTERVAL  = 30   # seconds between price scans
+SCAN_INTERVAL  = 10   # seconds between price scans — faster to catch spikes
 RESOLVE_INTERVAL = 60 # seconds between resolver runs
 
 # Global strategy instances
