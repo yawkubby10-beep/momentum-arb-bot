@@ -62,13 +62,13 @@ class LiveExecutorV2:
         if not self._funder:
             raise ValueError("WALLET_FUNDER_ADDRESS env var not set")
 
-        # Step 1: derive API credentials using direct CLOB (auth needs direct connection)
+        # Step 1: derive API credentials using Magic wallet (sig type 1)
         temp = ClobClient(
             host=CLOB_HOST,
             chain_id=CHAIN_ID,
             key=self._private_key,
-            signature_type=0,
-            funder=self._funder,
+            signature_type=1,
+            funder=PROXY_WALLET,
         )
         creds = temp.create_or_derive_api_key()
 
