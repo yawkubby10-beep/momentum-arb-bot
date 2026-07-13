@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Direct CLOB — Hetzner Finland is not geoblocked by Polymarket
 CLOB_HOST          = "https://clob.polymarket.com"
+PROXY_WALLET       = "0x1Ecc204962b51452A857A2B7E2f2112C9a0a8a45"  # Gnosis Safe proxy — signature_type=2
 CHAIN_ID           = 137
 TICK_SIZE          = "0.01"    # 15-min crypto markets use 0.01
 NEG_RISK           = False     # 15-min BTC/ETH/SOL markets are not neg-risk
@@ -71,14 +72,14 @@ class LiveExecutorV2:
         )
         creds = temp.create_or_derive_api_key()
 
-        # Step 2: trading client — EOA signature type 0
+        # Step 2: trading client — POLY_GNOSIS_SAFE (sig type 2) with proxy wallet
         client = ClobClient(
             host=CLOB_HOST,
             chain_id=CHAIN_ID,
             key=self._private_key,
             creds=creds,
-            signature_type=0,
-            funder=self._funder,
+            signature_type=2,
+            funder=PROXY_WALLET,
         )
 
         # Step 3b: direct client for heartbeat (must use same host as auth)
