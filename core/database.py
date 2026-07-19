@@ -219,12 +219,16 @@ def close_trade(trade_id: int, exit_price: float, exit_reason: str) -> Optional[
         size  = trade["size"]
         side  = trade["side"]
 
-        if side in ("long", "YES", "buy"):
-            pnl     = (exit_price - entry) * size
-            pnl_pct = ((exit_price - entry) / entry) * 100 if entry else 0.0
-        else:
+        # On Polymarket we only ever BUY outcome tokens — "NO" means we
+        # bought the Down/No token, not that we are short. A bought token's
+        # P&L is (exit − entry) regardless of which outcome it represents.
+        # (v1 used short math for NO → every DOWN trade's P&L sign-flipped.)
+        if side in ("short", "sell"):
             pnl     = (entry - exit_price) * size
             pnl_pct = ((entry - exit_price) / entry) * 100 if entry else 0.0
+        else:
+            pnl     = (exit_price - entry) * size
+            pnl_pct = ((exit_price - entry) / entry) * 100 if entry else 0.0
 
         now = datetime.now(timezone.utc).isoformat()
         conn.execute("""
@@ -323,6 +327,37 @@ def get_performance(strategy: str = None, days: int = 30) -> Dict:
         }
     finally:
         conn.close()
+
+
+def get_calibration(strategy_prefix: str = "pm_") -> Dict:
+    """Claimed model probability vs resolved reality — the house metric.
+    Only trades that reached RESOLUTION count (mid-life exits tell you
+    nothing about whether the directional call was right)."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT metadata, pnl FROM trades WHERE status='closed' "
+            "AND exit_reason='resolution' AND strategy LIKE ?",
+            (strategy_prefix + "%",)
+        ).fetchall()
+    finally:
+        conn.close()
+    n, wins, p_sum = 0, 0, 0.0
+    for r in rows:
+        try:
+            mp = float(json.loads(r["metadata"] or "{}").get("model_p", 0))
+        except Exception:
+            mp = 0.0
+        if mp <= 0:
+            continue
+        n += 1
+        p_sum += mp
+        if (r["pnl"] or 0) > 0:
+            wins += 1
+    if not n:
+        return {"n": 0}
+    return {"n": n, "model_pct": round(p_sum / n * 100, 1),
+            "real_pct": round(wins / n * 100, 1)}
 
 
 def get_total_balance() -> float:

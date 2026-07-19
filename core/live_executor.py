@@ -221,8 +221,12 @@ class LiveExecutorV2:
 
         # Worst-price ceiling for FAK: 3% above signal (slippage protection)
         # Round to tick size 0.01
-        raw_worst = signal_price * (1 + FAK_BUFFER)
-        worst_price = round(round(raw_worst / 0.01) * 0.01, 2)
+        if sig.get("worst_price"):
+            # v2 engine passes its exact EV-gated limit — no +3% chasing
+            worst_price = round(float(sig["worst_price"]), 2)
+        else:
+            raw_worst = signal_price * (1 + FAK_BUFFER)
+            worst_price = round(round(raw_worst / 0.01) * 0.01, 2)
         worst_price = min(worst_price, 0.97)  # never exceed 0.97
 
         logger.info(
@@ -268,6 +272,11 @@ class LiveExecutorV2:
                     f"LiveExecutorV2: FAK unmatched — no resting orders "
                     f"at worst_price={worst_price:.2f}, skipping trade"
                 )
+                if sig.get("probe"):
+                    # probe_live: an ACCEPTED-then-killed order proves the
+                    # pipe — auth, signature, geo, balance all validated
+                    return {"order_id": order_id, "actual_price": 0.0,
+                            "status": "unmatched"}
                 return None
 
             if status in ("matched", "live", "delayed"):

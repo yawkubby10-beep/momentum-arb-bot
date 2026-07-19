@@ -22,13 +22,19 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, ContextTypes
 from aiohttp import web
 
-from core.momentum_arb import MomentumArbStrategy
-from core.resolver import MomentumResolver
+from core import pm_engine
+from core.pm_engine import SpotFeed, fair_p_up, fetch_book, fetch_market, \
+    depth_at, walk_asks, interval_slug, INTERVAL_S
+from core.resolver import PMResolver
 from core.live_executor import LiveExecutorV2 as LiveExecutor
 from core.database import (
-    init_db, get_open_trades, get_performance,
-    is_daily_loss_limit_hit, get_conn
+    init_db, get_open_trades, get_performance, get_calibration,
+    is_daily_loss_limit_hit, get_conn, open_trade, close_trade
 )
+import aiohttp
+import json
+import math
+import time
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,15 +45,71 @@ logger = logging.getLogger(__name__)
 TOKEN          = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_USER   = int(os.getenv("ALLOWED_USER_ID", "0"))
 PAPER_MODE     = os.getenv("PAPER_MODE", "true").lower() == "true"
-SCAN_INTERVAL  = 10   # seconds between price scans — faster to catch spikes
-RESOLVE_INTERVAL = 60 # seconds between resolver runs
+RESOLVE_INTERVAL = 12
 
-# Global strategy instances
-mom           = MomentumArbStrategy()
-resolver      = MomentumResolver()
+# ── NEXUS v2 strategy config (kalshi-v3 doctrine, Polymarket economics) ───
+CONV_MIN_P   = float(os.getenv("CONV_MIN_P", "0.90"))
+CONV_MIN_EV  = float(os.getenv("CONV_MIN_EV", "0.02"))
+CONV_MIN_TAU = float(os.getenv("CONV_MIN_TAU", "45"))
+CONV_MAX_TAU = float(os.getenv("CONV_MAX_TAU", "480"))
+PRICE_MIN    = float(os.getenv("PRICE_MIN", "0.55"))
+PRICE_MAX    = float(os.getenv("PRICE_MAX", "0.97"))
+MAX_DIVERGENCE = float(os.getenv("MAX_DIVERGENCE", "0.12"))
+SPREAD_BUFFER  = float(os.getenv("SPREAD_BUFFER", "0.005"))
+LAG_Z        = float(os.getenv("LAG_Z", "3.0"))
+LAG_MIN_P    = float(os.getenv("LAG_MIN_P", "0.55"))
+LAG_MIN_EV   = float(os.getenv("LAG_MIN_EV", "0.04"))
+LAG_LOOKBACK = float(os.getenv("LAG_LOOKBACK_S", "8"))
+LAG_MIN_MOVE = float(os.getenv("LAG_MIN_MOVE", "0.0008"))
+LAG_MIN_TAU  = float(os.getenv("LAG_MIN_TAU", "60"))
+LAG_MAX_TAU  = float(os.getenv("LAG_MAX_TAU", "780"))
+LAG_COOLDOWN = float(os.getenv("LAG_COOLDOWN_S", "60"))
+STAKE_USD    = float(os.getenv("STAKE_USD", os.getenv("MOMENTUM_STAKE", "10")))
+MAX_SHARES   = float(os.getenv("MAX_SHARES", "40"))
+MIN_FILL     = float(os.getenv("MIN_FILL_SHARES", "3"))
+DEPTH_FRAC   = float(os.getenv("DEPTH_FRACTION", "0.30"))
+SPIKE_MAX    = float(os.getenv("SPIKE_MAX", "2.5"))
+CHOP_MAX     = int(os.getenv("CHOP_MAX_BURSTS", "3"))
+CHOP_WINDOW  = float(os.getenv("CHOP_WINDOW_S", "600"))
+TAIL_MULT    = float(os.getenv("TAIL_MULT", "1.25"))
+
+
+def _parse_blackouts(spec):
+    out = []
+    for part in (spec or "").split(","):
+        if "-" not in part:
+            continue
+        try:
+            a, z = part.strip().split("-")
+            h1, m1 = map(int, a.split(":")); h2, m2 = map(int, z.split(":"))
+            out.append((h1 * 60 + m1, h2 * 60 + m2))
+        except ValueError:
+            continue
+    return out
+
+
+BLACKOUTS = _parse_blackouts(os.getenv(
+    "NEWS_BLACKOUT_UTC", "12:25-12:45,13:55-14:15,18:00-18:20"))
+
+
+def in_blackout():
+    now = datetime.now(timezone.utc)
+    cur = now.hour * 60 + now.minute
+    return any(a <= cur <= b for a, b in BLACKOUTS)
+
+
+# Global engine instances
+http_session  = None
+def _sess():
+    return http_session
+spot          = SpotFeed(_sess)
+resolver      = None   # built in on_startup (needs spot)
 live_executor = LiveExecutor()
-app_ref       = None  # Telegram app reference
-KILL_SWITCH   = False  # Set True to block all new live orders
+app_ref       = None
+KILL_SWITCH   = False
+recent_bursts = {c: [] for c in pm_engine.SYMBOLS}
+lag_cooldown  = {c: 0.0 for c in pm_engine.SYMBOLS}
+_mkt_cache    = {}     # (crypto, iv_ts) -> market meta or None
 
 # ── Alert helper ──────────────────────────────────────────────────────────────
 async def alert(text: str):
@@ -59,72 +121,202 @@ async def alert(text: str):
         logger.error(f"Alert failed: {e}")
 
 # ── Main loops ────────────────────────────────────────────────────────────────
-async def momentum_loop():
-    """Scan for momentum signals every 30 seconds."""
-    await asyncio.sleep(5)  # startup delay
+async def spot_loop():
     while True:
         try:
-            if not is_daily_loss_limit_hit():
-                signals = await mom.scan()
-                for sig in signals:
-                    sym  = sig["symbol"]
-                    side = sig["trade_side"]
-                    # Hedge/duplicate prevention
-                    existing = get_open_trades("momentum_arb")
-                    opp = "NO" if side == "YES" else "YES"
-                    if any(t.get("symbol")==sym and t.get("side","").upper()==side for t in existing):
-                        logger.info(f"Skip {sym} {side} — already open")
-                        continue
-                    if any(t.get("symbol")==sym and t.get("side","").upper()==opp for t in existing):
-                        logger.info(f"Skip {sym} {side} — hedge prevention")
-                        continue
-                    # Open trade: live or paper
-                    from core.database import open_trade
-                    entry_price = sig["best_price"]  # default (paper)
-
-                    if not PAPER_MODE:
-                        if KILL_SWITCH:
-                            logger.warning(f"KILL SWITCH ACTIVE — blocking live order for {sym} {side}")
-                            continue
-                        # LIVE: place real FAK order on Polymarket CLOB
-                        fill = await live_executor.place_entry(sig)
-                        if fill is None:
-                            logger.info(f"Live entry failed/unfilled for {sym} {side} — skipping")
-                            continue
-                        entry_price = fill["actual_price"]
-                        logger.info(f"Live fill: {sym} {side} @ {entry_price:.4f} (order {fill['order_id'][:16]}...)")
-
-                    tid = open_trade(
-                        "momentum_arb", sym, side,
-                        entry_price, sig.get("stake", 10.0),
-                        stop_loss=sig.get("stop_loss"),
-                        take_profit=sig.get("take_profit"),
-                        metadata={
-                            "kucoin_price":  sig.get("kucoin_price", 0),
-                            "momentum":      sig.get("momentum", ""),
-                            "yes_prob":      sig.get("yes_prob", 0),
-                            "slug":          sig.get("slug", ""),
-                            "best_token_id": sig.get("best_token_id", ""),
-                            "yes_token_id":  sig.get("yes_token_id", ""),
-                            "no_token_id":   sig.get("no_token_id", ""),
-                            "live_order_id": fill["order_id"] if not PAPER_MODE and fill else "",
-                        },
-                        paper=PAPER_MODE
-                    )
-                    if tid:
-                        mode_tag = "📄 PAPER" if PAPER_MODE else "💵 LIVE"
-                        side_emoji = "📈" if side == "YES" else "📉"
-                        await alert(
-                            f"{side_emoji} Momentum Arb [{mode_tag}]\n"
-                            f"{sym} {sig.get('momentum','')}\n"
-                            f"Market lagging: {side}={sig.get('yes_prob',0):.0f}%\n"
-                            f"Entry: ${entry_price:.4f} | Stake: ${sig.get('stake',10):.1f}\n"
-                            f"SL: ${sig.get('stop_loss',0):.4f} | TP: ${sig.get('take_profit',0):.4f}\n"
-                            f"{sig.get('secs_remaining',0):.0f}s remaining"
-                        )
+            await spot.poll_once()
         except Exception as e:
-            logger.error(f"Momentum loop error: {e}", exc_info=True)
-        await asyncio.sleep(SCAN_INTERVAL)
+            logger.debug(f"spot poll: {e}")
+        await asyncio.sleep(2.0)
+
+
+async def _get_market(crypto: str, iv_ts: int):
+    key = (crypto, iv_ts)
+    if key in _mkt_cache:
+        return _mkt_cache[key]
+    m = await fetch_market(http_session, crypto, iv_ts)
+    _mkt_cache[key] = m
+    if len(_mkt_cache) > 60:
+        for k in sorted(_mkt_cache)[: len(_mkt_cache) - 40]:
+            _mkt_cache.pop(k, None)
+    return m
+
+
+def _slug_exposed(slug: str) -> bool:
+    for t in get_open_trades():
+        if not str(t.get("strategy", "")).startswith("pm_"):
+            continue
+        try:
+            if json.loads(t.get("metadata") or "{}").get("slug") == slug:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def execute_entry(strategy: str, m: dict, side_is_up: bool,
+                        p_side: float, tau: float, book: dict):
+    """Shared taker entry: paper walks the real book; live sends an exact
+    worst-price FAK. DB records what actually filled."""
+    token_id = m["up_tid"] if side_is_up else m["down_tid"]
+    token_idx = m["up_idx"] if side_is_up else 1 - m["up_idx"]
+    ask = book["ask"]
+    want = min(MAX_SHARES, math.floor(STAKE_USD / ask),
+               math.floor(DEPTH_FRAC * depth_at(book["asks"], ask)))
+    if want < MIN_FILL:
+        return None
+    if PAPER_MODE:
+        filled, vwap = walk_asks(book["asks"], ask, want)
+        if filled < MIN_FILL:
+            return None
+    else:
+        if KILL_SWITCH:
+            return None
+        fill = await live_executor.place_entry({
+            "best_token_id": token_id, "best_price": ask,
+            "worst_price": round(ask, 2), "trade_side":
+            "YES" if side_is_up else "NO", "stake": round(want * ask, 2),
+            "symbol": m["crypto"],
+        })
+        if not fill:
+            return None
+        vwap = float(fill["actual_price"])
+        filled = round(want * ask / vwap, 2) if vwap > 0 else 0
+        if filled < MIN_FILL:
+            return None
+    side = "YES" if side_is_up else "NO"
+    tid = open_trade(
+        strategy, m["crypto"], side, vwap, filled,
+        metadata={
+            "slug": m["slug"], "iv_ts": m["iv_ts"], "end_ts": m["end_ts"],
+            "token_id": token_id, "token_idx": token_idx,
+            "side_is_up": side_is_up, "crypto": m["crypto"],
+            "model_p": round(p_side, 4), "tau": round(tau, 1),
+            "mode": "paper" if PAPER_MODE else "live",
+        },
+        paper=PAPER_MODE)
+    if tid:
+        mode = "📄 PAPER" if PAPER_MODE else "💵 LIVE"
+        win = filled * (1 - vwap)
+        await alert(
+            f"{mode} | {strategy.upper()} TAKER\n"
+            f"🪙 {m['crypto']} {'UP' if side_is_up else 'DOWN'} @ "
+            f"{vwap*100:.0f}¢ ×{filled:.0f}\n"
+            f"🎯 model p={p_side:.3f} | τ={tau:.0f}s\n"
+            f"✅ win +${win:.2f} | ❌ loss $-{filled*vwap:.2f}\n"
+            f"📋 {m['slug']}")
+    return tid
+
+
+async def conv_loop():
+    await asyncio.sleep(8)
+    while True:
+        await asyncio.sleep(2.0)
+        try:
+            if in_blackout() or is_daily_loss_limit_hit():
+                continue
+            now = time.time()
+            for crypto in pm_engine.SYMBOLS:
+                if not spot.ready(crypto):
+                    continue
+                v = spot.vol[crypto]
+                if v.spike_ratio > SPIKE_MAX:
+                    continue
+                recent_bursts[crypto] = [
+                    x for x in recent_bursts[crypto] if now - x <= CHOP_WINDOW]
+                if len(recent_bursts[crypto]) >= CHOP_MAX:
+                    continue
+                iv = int(now // INTERVAL_S) * INTERVAL_S
+                tau = iv + INTERVAL_S - now
+                if not (CONV_MIN_TAU <= tau <= CONV_MAX_TAU):
+                    continue
+                open_px = spot.interval_open(crypto, iv)
+                if not open_px:
+                    continue          # never trade an unwitnessed strike
+                m = await _get_market(crypto, iv)
+                if not m or _slug_exposed(m["slug"]):
+                    continue
+                p_up = fair_p_up(spot.price[crypto], open_px, tau,
+                                 v.sigma_for_tau(tau), TAIL_MULT)
+                if p_up >= CONV_MIN_P:
+                    side_up, p_side = True, p_up
+                elif (1 - p_up) >= CONV_MIN_P:
+                    side_up, p_side = False, 1 - p_up
+                else:
+                    continue
+                token = m["up_tid"] if side_up else m["down_tid"]
+                book = await fetch_book(http_session, token)
+                if not book:
+                    continue
+                ask = book["ask"]
+                if not (PRICE_MIN <= ask <= PRICE_MAX):
+                    continue
+                if p_side - ask > MAX_DIVERGENCE:
+                    logger.info(f"divergence guard {crypto}: p={p_side:.3f} "
+                                f"vs ask {ask:.2f} — assuming WE are wrong")
+                    continue
+                ev = p_side - ask - SPREAD_BUFFER
+                if ev < CONV_MIN_EV:
+                    continue
+                await execute_entry("pm_conv", m, side_up, p_side, tau, book)
+        except Exception as e:
+            logger.error(f"conv loop: {e}", exc_info=True)
+
+
+async def lag_loop():
+    await asyncio.sleep(10)
+    while True:
+        await asyncio.sleep(0.5)
+        try:
+            if in_blackout() or is_daily_loss_limit_hit():
+                continue
+            now = time.time()
+            for crypto in pm_engine.SYMBOLS:
+                if now < lag_cooldown[crypto] or not spot.ready(crypto):
+                    continue
+                r, dt = spot.move_over(crypto, LAG_LOOKBACK)
+                if dt <= 0:
+                    continue
+                sig = spot.vol[crypto].sigma_1s * math.sqrt(max(dt, 0.5))
+                z = abs(r) / sig if sig > 0 else 0
+                if z < LAG_Z or abs(r) < LAG_MIN_MOVE:
+                    continue
+                lag_cooldown[crypto] = now + LAG_COOLDOWN
+                recent_bursts[crypto].append(now)
+                iv = int(now // INTERVAL_S) * INTERVAL_S
+                tau = iv + INTERVAL_S - now
+                if not (LAG_MIN_TAU <= tau <= LAG_MAX_TAU):
+                    continue
+                open_px = spot.interval_open(crypto, iv)
+                if not open_px:
+                    continue
+                m = await _get_market(crypto, iv)
+                if not m or _slug_exposed(m["slug"]):
+                    continue
+                # burst-inflated fast vol excluded from pricing
+                p_up = fair_p_up(spot.price[crypto], open_px, tau,
+                                 spot.vol[crypto].sigma_for_tau(
+                                     tau, include_fast=False), TAIL_MULT)
+                for side_up, p_side in ((True, p_up), (False, 1 - p_up)):
+                    if p_side < LAG_MIN_P:
+                        continue
+                    token = m["up_tid"] if side_up else m["down_tid"]
+                    book = await fetch_book(http_session, token)
+                    if not book:
+                        continue
+                    ask = book["ask"]
+                    if not (0.05 <= ask <= 0.95):
+                        continue
+                    if p_side - ask > MAX_DIVERGENCE:
+                        continue
+                    if p_side - ask - SPREAD_BUFFER < LAG_MIN_EV:
+                        continue
+                    await execute_entry("pm_lag", m, side_up, p_side,
+                                        tau, book)
+                    break
+        except Exception as e:
+            logger.error(f"lag loop: {e}", exc_info=True)
+
 
 async def resolver_loop():
     """Resolve open trades every 60 seconds."""
@@ -132,15 +324,21 @@ async def resolver_loop():
     while True:
         try:
             closed = await resolver.resolve()
+            for msg in resolver.pending_alerts:
+                await alert(msg)
+            resolver.pending_alerts.clear()
             for trade in closed:
                 pnl    = trade.get("pnl", 0)
                 sym    = trade.get("symbol", "")
                 reason = trade.get("exit_reason", "")
                 emoji  = "✅" if pnl > 0 else ("⚪" if pnl == 0 else "❌")
+                cal = get_calibration("pm_")
+                cal_line = (f"\n🎓 calib: model {cal['model_pct']}% vs real "
+                            f"{cal['real_pct']}% ({cal['n']} resolved)"
+                            if cal.get("n") else "")
                 await alert(
-                    f"{emoji} Trade Resolved\n"
-                    f"{sym}\n"
-                    f"P&L: ${pnl:+.4f} | {reason}"
+                    f"{emoji} {reason.upper()} | {sym}\n"
+                    f"P&L: ${pnl:+.2f}{cal_line}"
                 )
         except Exception as e:
             logger.error(f"Resolver loop error: {e}", exc_info=True)
@@ -227,26 +425,31 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     losses = [t for t in trades if (t.get("pnl") or 0) < 0]
     total  = sum(t.get("pnl") or 0 for t in trades)
     wr     = len(wins) / len(trades) * 100 if trades else 0
+    cal = get_calibration("pm_")
+    cal_line = (f"\n🎓 Calibration (resolved): model {cal['model_pct']}% "
+                f"vs real {cal['real_pct']}% ({cal['n']}T)"
+                if cal.get("n") else "\n🎓 Calibration: no resolved trades yet")
     await update.message.reply_text(
-        f"Momentum Arb P&L\n"
+        f"NEXUS v2 P&L\n"
         f"Trades: {len(trades)} | W:{len(wins)} L:{len(losses)}\n"
         f"Win Rate: {wr:.1f}%\n"
-        f"Total P&L: ${total:+.2f}"
+        f"Total P&L: ${total:+.2f}{cal_line}"
     )
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ALLOWED_USER: return
-    open_trades = get_open_trades("momentum_arb")
+    open_trades = [t for t in get_open_trades()
+                   if str(t.get("strategy", "")).startswith("pm_")]
     conn = get_conn()
     closed = conn.execute("SELECT COUNT(*) as c FROM trades WHERE status='closed'").fetchone()["c"]
     conn.close()
     await update.message.reply_text(
-        f"Momentum Arb Bot\n"
+        f"NEXUS v2 (fair-value engine)\n"
         f"Paper: {PAPER_MODE}\n"
-        f"Stake: ${os.getenv('MOMENTUM_STAKE', '3.0')}/trade\n"
-        f"Open positions: {len(open_trades)}\n"
-        f"Closed trades: {closed}\n"
-        f"Scan: every {SCAN_INTERVAL}s",
+        f"Stake: ${STAKE_USD:.0f}/trade | shares≤{MAX_SHARES:.0f}\n"
+        f"Open: {len(open_trades)} | Closed: {closed}\n"
+        f"CONV p≥{CONV_MIN_P} ev≥{CONV_MIN_EV*100:.0f}¢ | "
+        f"LAG z≥{LAG_Z} p≥{LAG_MIN_P}",
         reply_markup=KEYBOARD
     )
 
@@ -411,9 +614,18 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── App startup ───────────────────────────────────────────────────────────────
 async def on_startup(app):
-    global app_ref
+    global app_ref, http_session, resolver
     app_ref = app
     init_db()
+    http_session = aiohttp.ClientSession()
+    resolver = PMResolver(spot, _sess)
+    # Purge legacy v1 momentum trades: neutral close at entry (uncounted)
+    legacy = get_open_trades("momentum_arb")
+    for t in legacy:
+        close_trade(t["id"], t.get("entry_price") or 0, "legacy_purge")
+    if legacy:
+        await alert(f"🧹 purged {len(legacy)} legacy v1 momentum positions "
+                    f"(neutral, uncounted)")
     if not PAPER_MODE:
         ok = await live_executor.initialise()
         if not ok:
@@ -422,11 +634,18 @@ async def on_startup(app):
                 text="⚠️ LiveExecutor failed to initialise — check WALLET_PRIVATE_KEY and WALLET_FUNDER_ADDRESS. Running in PAPER MODE as fallback."
             )
             logger.error("LiveExecutor init failed — will paper trade only")
-    asyncio.create_task(momentum_loop())
+    asyncio.create_task(spot_loop())
+    asyncio.create_task(conv_loop())
+    asyncio.create_task(lag_loop())
     asyncio.create_task(resolver_loop())
     await alert(
-        f"Momentum Arb Bot started\n"
-        f"Paper: {PAPER_MODE} | Stake: ${os.getenv('MOMENTUM_STAKE','3.0')}/trade"
+        f"🤖 NEXUS v2 STARTED [{'PAPER' if PAPER_MODE else 'LIVE'}]\n"
+        f"CONV: p≥{CONV_MIN_P} ev≥{CONV_MIN_EV*100:.0f}¢ "
+        f"τ∈[{CONV_MIN_TAU:.0f},{CONV_MAX_TAU:.0f}]s | "
+        f"LAG: z≥{LAG_Z} ev≥{LAG_MIN_EV*100:.0f}¢\n"
+        f"Fair value vs CLOB books; strikes only from witnessed interval "
+        f"opens; settlements at true $1/$0.\n"
+        f"⚠️ v2 trades far less than v1 — that is the design."
     )
 
 def main():

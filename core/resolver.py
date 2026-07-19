@@ -1,151 +1,140 @@
 """
-Momentum Arb Trade Resolver
-Closes momentum trades via:
-1. Live Polymarket CLOB share price hitting TP/SL
-2. 30-minute force-close (market expires, API removes it)
+NEXUS v2 Resolver — resolution truth, never fiction
+====================================================
+v1 sins, all removed:
+- NO-side stop logic compared the NO token's own price against YES-style
+  thresholds -> every DOWN trade insta-stopped at -30% on first pass.
+- 30-minute force-close AT ENTRY erased every resolution outcome from the
+  books (wins to $1 and losses to $0 both booked as breakeven).
+- Stops filled at the stop PRICE, not the price that triggered them.
 
-All fixes included:
-- YES/NO direction correct
-- session scope fix
-- clobTokenIds JSON string parsing
-- token_id saved to metadata
-- funding_rate excluded (not used here)
+v2 rules:
+- Before interval end: model-based stop only (p_side < STOP_P), filled by
+  walking the REAL bids of the token we hold.
+- After interval end: poll Gamma until outcomePrices show the winner, then
+  settle at exactly $1.00 or $0.00. If resolution is overdue we ALERT and
+  HOLD — we never invent an exit price.
 """
 
-import asyncio
-import aiohttp
-import logging
 import json
-from datetime import datetime, timezone
-from typing import List, Dict, Optional
+import logging
+import os
+import time
+from typing import Dict, List, Optional
 
-from core.database import get_open_trades, close_trade
+import aiohttp
+
+from core import pm_engine
+from core.database import close_trade, get_open_trades
 
 logger = logging.getLogger(__name__)
 
-GAMMA_API = "https://gamma-api.polymarket.com"
+STOP_P = float(os.getenv("STOP_P", "0.30"))
+STOP_MIN_TAU = float(os.getenv("STOP_MIN_TAU", "30"))
+TAIL_MULT = float(os.getenv("TAIL_MULT", "1.25"))
+RES_OVERDUE_S = float(os.getenv("RES_OVERDUE_S", "1800"))
 
-class MomentumResolver:
 
-    def __init__(self):
-        self.session: Optional[aiohttp.ClientSession] = None
-
-    async def _get_session(self):
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession(
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=aiohttp.ClientTimeout(total=10)
-            )
-        return self.session
+class PMResolver:
+    def __init__(self, spot: "pm_engine.SpotFeed", session_getter):
+        self.spot = spot
+        self._session = session_getter
+        self._overdue_alerted: set = set()
+        self.pending_alerts: List[str] = []
 
     async def resolve(self) -> List[Dict]:
-        """Check all open momentum trades and close those that hit TP/SL or expired."""
-        open_trades = get_open_trades("momentum_arb")
-        logger.info(f"Resolver: checking {len(open_trades)} momentum trades")
-        closed = []
-
-        for trade in open_trades:
-            trade_id  = trade["id"]
-            symbol    = trade.get("symbol", "")
-            side      = (trade.get("side") or "").upper()
-            entry     = float(trade.get("entry_price") or 0)
-            stop_loss = trade.get("stop_loss")
-            take_profit = trade.get("take_profit")
-            opened_at = trade.get("opened_at", "")
-
-            if entry <= 0:
+        closed: List[Dict] = []
+        rows = [t for t in get_open_trades()
+                if str(t.get("strategy", "")).startswith("pm_")]
+        now = time.time()
+        sess = self._session()
+        for t in rows:
+            try:
+                meta = json.loads(t.get("metadata") or "{}")
+            except Exception:
+                meta = {}
+            end_ts = float(meta.get("end_ts") or 0)
+            token_id = meta.get("token_id") or ""
+            token_idx = int(meta.get("token_idx", 0))
+            crypto = meta.get("crypto", "")
+            iv_ts = int(meta.get("iv_ts") or 0)
+            side_is_up = bool(meta.get("side_is_up", t.get("side") == "YES"))
+            shares = float(t.get("size") or 0)
+            if not token_id or end_ts <= 0:
                 continue
 
-            # ── Check 1: Live Polymarket share price ──────────────────────────
-            meta = {}
-            try:
-                meta = json.loads(trade.get("metadata") or "{}")
-            except Exception:
-                pass
+            if now < end_ts - 5:
+                res = await self._try_stop(sess, t, meta, crypto, iv_ts,
+                                           side_is_up, token_id, shares,
+                                           end_ts - now)
+                if res:
+                    closed.append(res)
+                continue
 
-            # Extract token_id — clobTokenIds stored as JSON string in Gamma API
-            raw_tid = meta.get("best_token_id") or meta.get("yes_token_id") or ""
-            if isinstance(raw_tid, list):
-                token_id = raw_tid[0] if raw_tid else ""
-            elif isinstance(raw_tid, str) and raw_tid.startswith("["):
-                try:
-                    token_id = json.loads(raw_tid)[0]
-                except Exception:
-                    token_id = ""
+            # ── resolution ────────────────────────────────────────────
+            m = await pm_engine.fetch_market(sess, crypto, iv_ts)
+            outcome_prices = None
+            if m is None:
+                # fetch_market returns None on parse issues; query raw
+                outcome_prices = await self._raw_outcome_prices(
+                    sess, meta.get("slug", ""))
             else:
-                token_id = raw_tid
-
-            logger.info(f"Resolver: {symbol} token_id={str(token_id)[:20]!r} meta_keys={list(meta.keys())}")
-            if token_id:
-                share_price = await self._fetch_share_price(token_id)
-                logger.info(f"Resolver: {symbol} share_price={share_price}")
-                if share_price > 0:
-                    logger.info(f"Share price: {symbol} {share_price:.3f} SL={stop_loss} TP={take_profit} side={side}")
-                    # YES: profit when price rises → TP when high, SL when low
-                    # NO:  profit when price falls → TP when low,  SL when high
-                    is_yes = side in ("YES", "BUY", "long")
-                    sl_hit = stop_loss and (
-                        (is_yes and share_price <= float(stop_loss)) or
-                        (not is_yes and share_price >= float(stop_loss))
-                    )
-                    tp_hit = take_profit and (
-                        (is_yes and share_price >= float(take_profit)) or
-                        (not is_yes and share_price <= float(take_profit))
-                    )
-                    if sl_hit:
-                        result = close_trade(trade_id, float(stop_loss), "stop_loss")
-                        if result:
-                            closed.append(result)
-                            logger.info(f"Closed SL: {symbol} {side} @ {share_price:.3f}")
-                        continue
-                    elif tp_hit:
-                        result = close_trade(trade_id, float(take_profit), "take_profit")
-                        if result:
-                            closed.append(result)
-                            logger.info(f"Closed TP: {symbol} {side} @ {share_price:.3f}")
-                        continue
-
-            # ── Check 2: 30-minute force close ───────────────────────────────
-            if opened_at:
-                try:
-                    opened = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
-                    age    = (datetime.now(timezone.utc) - opened).total_seconds()
-                    if age > 1800:
-                        result = close_trade(trade_id, entry, "momentum_expired")
-                        if result:
-                            closed.append(result)
-                            logger.info(f"Closed expired ({age/60:.0f}min): {symbol}")
-                except Exception as e:
-                    logger.debug(f"Age parse error: {e}")
-
+                outcome_prices = await self._raw_outcome_prices(
+                    sess, m["slug"])
+            exit_px = (pm_engine.resolution_outcome(outcome_prices, token_idx)
+                       if outcome_prices else None)
+            if exit_px is not None:
+                res = close_trade(t["id"], exit_px, "resolution")
+                if res:
+                    closed.append(res)
+                continue
+            if now > end_ts + RES_OVERDUE_S and t["id"] not in self._overdue_alerted:
+                self._overdue_alerted.add(t["id"])
+                self.pending_alerts.append(
+                    f"⏳ resolution overdue: #{t['id']} "
+                    f"{meta.get('slug','?')} — holding, will keep polling. "
+                    f"NOT inventing an exit price.")
         return closed
 
-    async def _fetch_share_price(self, token_id: str) -> float:
-        """Fetch live Polymarket share price from CLOB API."""
-        session = await self._get_session()
+    async def _raw_outcome_prices(self, sess, slug: str) -> Optional[list]:
+        if not slug:
+            return None
         try:
-            url = f"https://clob.polymarket.com/price?token_id={token_id}&side=BUY"
-            logger.info(f"CLOB fetch: {url[:80]}")
-            async with session.get(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0",
-                    "Accept": "application/json",
-                    "Origin": "https://polymarket.com",
-                    "Referer": "https://polymarket.com/",
-                },
-                timeout=aiohttp.ClientTimeout(total=5)
-            ) as r:
-                body = await r.text()
-                logger.info(f"CLOB response: status={r.status} body={body[:100]}")
-                if r.status == 200:
-                    import json as _j
-                    d = _j.loads(body)
-                    return float(d.get("price") or 0)
+            async with sess.get(pm_engine.GAMMA_API, params={"slug": slug},
+                                timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status != 200:
+                    return None
+                data = await r.json()
+            if not data:
+                return None
+            m = data[0] if isinstance(data, list) else data
+            return pm_engine._parse_clob(m.get("outcomePrices"))
         except Exception as e:
-            logger.info(f"CLOB fetch exception: {e}")
-        return 0.0
+            logger.debug(f"outcomePrices {slug}: {e}")
+            return None
 
-    async def close(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
+    async def _try_stop(self, sess, t, meta, crypto, iv_ts, side_is_up,
+                        token_id, shares, tau) -> Optional[Dict]:
+        if tau <= STOP_MIN_TAU or not self.spot.ready(crypto):
+            return None
+        open_px = self.spot.interval_open(crypto, iv_ts)
+        if not open_px:
+            return None          # cannot price without the witnessed open
+        S = self.spot.price[crypto]
+        sigma = self.spot.vol[crypto].sigma_for_tau(tau)
+        p_up = pm_engine.fair_p_up(S, open_px, tau, sigma, TAIL_MULT)
+        p_side = p_up if side_is_up else 1.0 - p_up
+        if p_side >= STOP_P:
+            return None
+        book = await pm_engine.fetch_book(sess, token_id)
+        if not book or book["bid"] < 0.03:
+            return None          # nothing to salvage
+        filled, vwap = pm_engine.bank_bids(book["bids"], book["bid"] - 0.02,
+                                           shares)
+        if filled < shares * 0.8:
+            return None          # thin bids: hold rather than partial-mangle
+        return close_trade(t["id"], vwap, "stop_loss")
+
+
+# import-compat alias for anything still importing the old name
+MomentumResolver = PMResolver
